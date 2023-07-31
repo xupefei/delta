@@ -17,6 +17,8 @@
 package org.apache.spark.sql.delta.commands
 
 // scalastyle:off import.ordering.noEmptyLine
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+
 import org.apache.spark.sql.delta.metric.IncrementMetric
 import org.apache.spark.sql.delta.{DeltaConfigs, DeltaLog, DeltaOperations, DeltaTableUtils, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.{AddCDCFile, AddFile, FileAction}
@@ -110,6 +112,9 @@ case class UpdateCommand(
     var changeFileBytes: Long = 0
     var scanTimeMs: Long = 0
     var rewriteTimeMs: Long = 0
+    var numDeletionVectorsAdded: Option[Long] = None
+    var numDeletionVectorsRemoved: Option[Long] = None
+    var numDeletionVectorsUpdated: Option[Long] = None
 
     val startTime = System.nanoTime()
     val numFilesTotal = txn.snapshot.numOfFiles
@@ -271,6 +276,10 @@ case class UpdateCommand(
     metrics("changeFileBytes").set(changeFileBytes)
     metrics("numRemovedFiles").set(numTouchedFiles)
     metrics("numRemovedBytes").set(numRemovedBytes)
+
+    metrics("numDeletionVectorsAdded").set(numDeletionVectorsAdded)
+    metrics("numDeletionVectorsRemoved").set(numDeletionVectorsRemoved)
+    metrics("numDeletionVectorsUpdated").set(numDeletionVectorsUpdated)
     metrics("executionTimeMs").set((System.nanoTime() - startTime) / 1000 / 1000)
     metrics("scanTimeMs").set(scanTimeMs)
     metrics("rewriteTimeMs").set(rewriteTimeMs)
@@ -309,7 +318,10 @@ case class UpdateCommand(
         numAddedChangeFiles,
         changeFileBytes,
         scanTimeMs,
-        rewriteTimeMs)
+        rewriteTimeMs,
+        numDeletionVectorsAdded,
+        numDeletionVectorsRemoved,
+        numDeletionVectorsUpdated)
     )
   }
 
@@ -479,6 +491,9 @@ object UpdateCommand {
  * @param changeFileBytes: total size of change files generated
  * @param scanTimeMs: how long did finding take
  * @param rewriteTimeMs: how long did rewriting take
+ * @param numDeletionVectorsAdded: how many deletion vectors were added
+ * @param numDeletionVectorsRemoved: how many deletion vectors were removed
+ * @param numDeletionVectorsUpdated: how many deletion vectors were updated
  *
  * @note All the time units are milliseconds.
  */
@@ -490,5 +505,11 @@ case class UpdateMetric(
     numAddedChangeFiles: Long,
     changeFileBytes: Long,
     scanTimeMs: Long,
-    rewriteTimeMs: Long
+    rewriteTimeMs: Long,
+    @JsonDeserialize(contentAs = classOf[java.lang.Long])
+    numDeletionVectorsAdded: Option[Long] = None,
+    @JsonDeserialize(contentAs = classOf[java.lang.Long])
+    numDeletionVectorsUpdated: Option[Long] = None,
+    @JsonDeserialize(contentAs = classOf[java.lang.Long])
+    numDeletionVectorsRemoved: Option[Long] = None
 )
