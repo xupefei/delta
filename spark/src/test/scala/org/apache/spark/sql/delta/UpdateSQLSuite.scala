@@ -17,14 +17,19 @@
 package org.apache.spark.sql.delta
 
 // scalastyle:off import.ordering.noEmptyLine
+import scala.collection.mutable
+import scala.util.Random
+
+import io.delta.tables.DeltaTable
+import org.scalatest.time
+
 import org.apache.spark.sql.delta.actions.{AddFile, FileAction, RemoveFile}
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.delta.test.{DeltaExcludedTestMixin, DeltaSQLCommandTest}
-
-import org.apache.spark.sql.{AnalysisException, QueryTest, Row}
+import org.apache.spark.sql.{AnalysisException, QueryTest, Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.errors.QueryExecutionErrors.toSQLType
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, expr, lit, uuid}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.SQLConf.StoreAssignmentPolicy
 
@@ -167,7 +172,7 @@ class UpdateSQLWithDeletionVectorsSuite extends UpdateSQLSuite
   with DeletionVectorsTestUtils {
   override def beforeAll(): Unit = {
     super.beforeAll()
-    enableDeletionVectors(spark, update = true)
+    // enableDeletionVectors(spark, update = true)
   }
 
   override def excluded: Seq[String] = super.excluded ++
@@ -180,6 +185,127 @@ class UpdateSQLWithDeletionVectorsSuite extends UpdateSQLSuite
       "schema pruning on finding files to update",
       "nested schema pruning on finding files to update"
     )
+
+  test("dv on vs off") {
+    withSQLConf(
+      DeltaConfigs.ENABLE_DELETION_VECTORS_CREATION.key -> "true",
+      DeltaSQLConf.UPDATE_USE_PERSISTENT_DELETION_VECTORS.key -> "true") {
+
+      def write_num_files_parquet(path: String, num_files: Int, num_rows_per_file: Long): Unit = {
+        spark.range(0, num_rows_per_file * num_files, 1, num_files)
+          .withColumn("file", col("id") % num_rows_per_file)
+          .withColumn("data1", uuid())
+          .withColumn("data2", uuid())
+          .withColumn("data3", uuid())
+          .withColumn("data4", uuid())
+          .withColumn("data5", uuid())
+          .withColumn("data6", uuid())
+          .withColumn("data7", uuid())
+          .withColumn("data8", uuid())
+          .withColumn("data9", uuid())
+          .withColumn("data10", uuid())
+          .withColumn("data11", uuid())
+          .withColumn("data12", uuid())
+          .withColumn("data13", uuid())
+          .withColumn("data14", uuid())
+          .withColumn("data15", uuid())
+          .withColumn("data16", uuid())
+          .withColumn("data17", uuid())
+          .withColumn("data18", uuid())
+          .withColumn("data19", uuid())
+          .withColumn("data20", uuid())
+          .write.format("delta")
+          .mode("overwrite")
+          .save(path)
+      }
+
+      def delete_and_read(
+          dt: io.delta.tables.DeltaTable,
+          rows_start: Long,
+          rows_end: Long
+      ): (Long, Long) = {
+        var start_time = System.nanoTime()
+
+        dt.update((col("file") >= rows_start) and (col("file") <= rows_end),
+          Map(s"data${Random.nextInt(20) + 1}" -> lit("uuid()")))
+
+        val time_to_delete = System.nanoTime() - start_time
+
+        start_time = System.nanoTime()
+        dt.toDF.selectExpr("sum(id)").collect()
+        val time_to_read = System.nanoTime() - start_time
+
+        (time_to_delete, time_to_read)
+      }
+
+      withTempDir { t1p =>
+        withTempDir { t2p =>
+          val t1 = t1p.getCanonicalPath
+          val t2 = t2p.getCanonicalPath
+          val num_files = 10
+          val num_rows = 1000000
+          write_num_files_parquet(t1, num_files, num_rows)
+          write_num_files_parquet(t2, num_files, num_rows)
+
+          val dt1 = io.delta.tables.DeltaTable.forPath(t1)
+          val dt2 = io.delta.tables.DeltaTable.forPath(t2)
+
+          spark.sql(
+            s"ALTER TABLE delta.`$t1` SET TBLPROPERTIES ('delta.enableDeletionVectors' = true)"
+          )
+
+          case class TestResult(
+              val mode: String,
+              val percent_file_deleted: Int,
+              val num_files_touched: Int,
+              val run: String,
+              val time_to_delete: Double,
+              val time_to_read: Double)
+
+          val percent_of_file_range = Range(1, 31, 2)
+          val amount_of_iterations_to_smooth = 3
+
+          dt1.history().select("version", "operation").show()
+          dt2.history().select("version", "operation").show()
+
+          for (percent <- percent_of_file_range) {
+            // for each of 2 dimensions (number of files touched, percent of file deleted)
+            for (run <- 0 until amount_of_iterations_to_smooth) {
+              // for this number of iterations (to smooth out noise)
+
+              // delete and read using DV enabled table and append to results
+              val (ted, ter) = delete_and_read(dt1, 0, (percent.toDouble / 100 * num_rows).toLong)
+              val tr = TestResult(
+                mode = "MoR",
+                percent_file_deleted = percent,
+                num_files_touched = num_files,
+                run = run.toString,
+                time_to_delete = ted,
+                time_to_read = ter
+              )
+              println(tr)
+
+              // delete and read using non DV enabled table and append to results
+              val (ted1, ter1) = delete_and_read(dt2, 0,
+                (percent.toDouble / 100 * num_rows).toLong)
+              val tr1 = TestResult(
+                mode = "CoW",
+                percent_file_deleted = percent,
+                num_files_touched = num_files,
+                run = run.toString,
+                time_to_delete = ted1,
+                time_to_read = ter1
+              )
+              println(tr1)
+
+              dt1.restoreToVersion(1) // restore to setting DV feature flag (DV table)
+              dt2.restoreToVersion(0) // restore to convert (non DV table)
+            }
+          }
+        }
+      }
+    }
+  }
 
   test("repeated UPDATE produces deletion vectors") {
     withTempDir { dir =>
